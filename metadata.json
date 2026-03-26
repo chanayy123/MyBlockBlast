@@ -1,0 +1,5 @@
+{
+  "name": "Block Blast Clone",
+  "description": "A classic block puzzle game where you place shapes on an 8x8 grid to clear rows and columns.",
+  "requestFramePermissions": []
+}
