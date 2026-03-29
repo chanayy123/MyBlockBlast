@@ -8,7 +8,7 @@ const urls = [
   { url: 'https://cdn.pixabay.com/audio/2021/11/24/audio_91b3cb0036.mp3', name: 'track3.mp3' }
 ];
 
-const dir = path.join(__dirname, 'public', 'audio');
+const dir = path.join(__dirname, 'src', 'assets', 'audio');
 if (!fs.existsSync(dir)){
     fs.mkdirSync(dir, { recursive: true });
 }

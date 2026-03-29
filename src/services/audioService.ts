@@ -1,7 +1,11 @@
+import track1Url from '../assets/audio/track1.mp3';
+import track2Url from '../assets/audio/track2.mp3';
+import track3Url from '../assets/audio/track3.mp3';
+
 export const BGM_TRACKS = [
-  { id: 'dynamic', name: 'Lofi Beat', url: '/audio/track1.mp3' },
-  { id: 'relaxing', name: 'Relaxing Acoustic', url: '/audio/track2.mp3' },
-  { id: 'ambient', name: 'Peaceful Piano', url: '/audio/track3.mp3' }
+  { id: 'dynamic', name: 'Lofi Beat', url: track1Url },
+  { id: 'relaxing', name: 'Hero Quest Piano', url: track2Url },
+  { id: 'ambient', name: 'Jungle Ambient', url: track3Url }
 ];
 
 class AudioService {

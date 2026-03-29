@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, useDragControls } from 'motion/react';
 import { Trophy, RotateCcw, Play, Settings, Bot, BarChart2, X, ChevronRight, ChevronDown, Volume2, VolumeX, Music } from 'lucide-react';
 import { GRID_SIZE, SHAPES, COLORS } from './constants';
 import { Grid, Shape, Position } from './types';
@@ -108,6 +108,52 @@ export default function App() {
 
   const gridRef = useRef<HTMLDivElement>(null);
   const cachedGridRect = useRef<DOMRect | null>(null);
+
+  // Drag controls for touch-anywhere-to-drag
+  const dragControlsMap = useRef<Map<string, any>>(new Map());
+  const isPointerDown = useRef(false);
+  const activeDragId = useRef<string | null>(null);
+
+  const registerDragControls = useCallback((id: string, controls: any) => {
+    dragControlsMap.current.set(id, controls);
+  }, []);
+
+  const checkDragStart = useCallback((e: React.PointerEvent) => {
+    if (activeDragId.current !== null) return;
+
+    // Find if the pointer is over any draggable block
+    const elements = document.elementsFromPoint(e.clientX, e.clientY);
+    for (const el of elements) {
+      const blockEl = el.closest('[data-shape-id]');
+      if (blockEl) {
+        const shapeId = blockEl.getAttribute('data-shape-id');
+        if (shapeId) {
+          const controls = dragControlsMap.current.get(shapeId);
+          if (controls) {
+            activeDragId.current = shapeId;
+            controls.start(e);
+            break;
+          }
+        }
+      }
+    }
+  }, []);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    isPointerDown.current = true;
+    checkDragStart(e);
+  }, [checkDragStart]);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (isPointerDown.current && activeDragId.current === null) {
+      checkDragStart(e);
+    }
+  }, [checkDragStart]);
+
+  const handlePointerUp = useCallback(() => {
+    isPointerDown.current = false;
+    activeDragId.current = null;
+  }, []);
 
   // Check if a shape can be placed at a specific position
   const canPlace = useCallback((shape: Shape, pos: Position, currentGrid: Grid): boolean => {
@@ -621,6 +667,7 @@ export default function App() {
     }
     setActiveShape(null);
     setActivePos(null);
+    activeDragId.current = null;
   }, [activeShape, activePos, handlePlace]);
 
   // Helper to check if a cell is part of the active preview
@@ -636,7 +683,13 @@ export default function App() {
   };
 
   return (
-    <div className="h-[100dvh] w-full flex flex-col items-center justify-start sm:justify-center py-4 px-2 sm:p-4 bg-[#121212] select-none overflow-hidden touch-none">
+    <div 
+      className="h-[100dvh] w-full flex flex-col items-center justify-start sm:justify-center py-4 px-2 sm:p-4 bg-[#121212] select-none overflow-hidden touch-none"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+    >
       {/* Header */}
       <div className="w-full max-w-md flex justify-between items-center mb-4 sm:mb-8">
         {/* Title & High Score */}
@@ -987,6 +1040,7 @@ export default function App() {
               }}
               onDrag={(e, info) => handleDrag(shape, e, info)}
               onDragEnd={handleDragEnd}
+              registerDragControls={registerDragControls}
             />
           </div>
         ))}
@@ -1000,17 +1054,26 @@ interface DraggableBlockProps {
   onDragStart: (info: { x: number, y: number }) => void;
   onDrag: (event: any, info: { point: { x: number; y: number }; grabOffset: { x: number, y: number } }) => void;
   onDragEnd: () => void;
+  registerDragControls: (id: string, controls: any) => void;
 }
 
-function DraggableBlock({ shape, onDragStart, onDrag, onDragEnd }: DraggableBlockProps) {
+function DraggableBlock({ shape, onDragStart, onDrag, onDragEnd, registerDragControls }: DraggableBlockProps) {
   const blockRef = useRef<HTMLDivElement>(null);
   const grabOffset = useRef<{ x: number, y: number }>({ x: 0, y: 0 });
+  const dragControls = useDragControls();
+
+  useEffect(() => {
+    registerDragControls(shape.id, dragControls);
+  }, [shape.id, dragControls, registerDragControls]);
 
   return (
     <div className="relative flex items-center justify-center">
       <motion.div
+        data-shape-id={shape.id}
         ref={blockRef}
         drag
+        dragControls={dragControls}
+        dragListener={false}
         dragMomentum={false}
         dragSnapToOrigin={true}
         onDragStart={(e, info) => {
