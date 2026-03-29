@@ -330,19 +330,12 @@ export default function App() {
     audioService.play('place');
     const placement = { pos, shape, score: blocksPlaced, id: Date.now() };
     setLastPlacement(placement);
-    setIsShaking(true);
     
     if (placementTimeoutRef.current) clearTimeout(placementTimeoutRef.current);
     placementTimeoutRef.current = setTimeout(() => {
       setLastPlacement(null);
       placementTimeoutRef.current = null;
     }, 500);
-
-    if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
-    shakeTimeoutRef.current = setTimeout(() => {
-      setIsShaking(false);
-      shakeTimeoutRef.current = null;
-    }, 200);
 
     // Calculate score for placement
     let newScore = score + blocksPlaced;
@@ -373,6 +366,14 @@ export default function App() {
     const nextTray = tray.filter(s => s.id !== shape.id);
 
     if (fullRows.length > 0 || fullCols.length > 0) {
+      // Trigger shake only on line clear
+      setIsShaking(true);
+      if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
+      shakeTimeoutRef.current = setTimeout(() => {
+        setIsShaking(false);
+        shakeTimeoutRef.current = null;
+      }, 200);
+
       const linesCleared = fullRows.length + fullCols.length;
       const newCombo = comboCount + 1;
       setComboCount(newCombo);
@@ -635,9 +636,9 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-[#121212] select-none">
+    <div className="h-[100dvh] w-full flex flex-col items-center justify-start sm:justify-center py-4 px-2 sm:p-4 bg-[#121212] select-none overflow-hidden touch-none">
       {/* Header */}
-      <div className="w-full max-w-md flex justify-between items-center mb-8">
+      <div className="w-full max-w-md flex justify-between items-center mb-4 sm:mb-8">
         {/* Title & High Score */}
         <div className="flex-1 flex justify-start">
           <div>
@@ -699,7 +700,7 @@ export default function App() {
       </div>
 
       {/* Combo/Feedback Floating Text */}
-      <div className="h-8 mb-2 flex items-center justify-center">
+      <div className="h-6 sm:h-8 mb-1 sm:mb-2 flex items-center justify-center">
         <AnimatePresence mode="wait">
           {feedback && (
             <motion.div
@@ -720,7 +721,7 @@ export default function App() {
       <div className="relative">
         <div 
           ref={gridRef}
-          className={`grid-container w-[320px] h-[320px] sm:w-[400px] sm:h-[400px] ${isShaking ? 'animate-shake' : ''}`}
+          className={`grid-container w-[300px] h-[300px] xs:w-[340px] xs:h-[340px] sm:w-[400px] sm:h-[400px] ${isShaking ? 'animate-shake' : ''}`}
         >
           {grid.map((row, r) => (
             row.map((cell, c) => {
@@ -976,7 +977,7 @@ export default function App() {
       </div>
 
       {/* Tray */}
-      <div className="mt-8 flex justify-center items-center gap-4 sm:gap-8 min-h-[160px] w-full max-w-md px-4 overflow-visible">
+      <div className="mt-4 sm:mt-8 flex justify-center items-center gap-2 sm:gap-8 min-h-[120px] sm:min-h-[160px] w-full max-w-md px-2 sm:px-4 overflow-visible">
         {tray.map((shape) => (
           <div key={shape.id} className="flex-1 flex justify-center items-center overflow-visible">
             <DraggableBlock 
