@@ -5,9 +5,10 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Trophy, RotateCcw, Play, Settings, Bot, BarChart2, X, ChevronRight, ChevronDown } from 'lucide-react';
+import { Trophy, RotateCcw, Play, Settings, Bot, BarChart2, X, ChevronRight, ChevronDown, Volume2, VolumeX, Music } from 'lucide-react';
 import { GRID_SIZE, SHAPES, COLORS } from './constants';
 import { Grid, Shape, Position } from './types';
+import { audioService, BGM_TRACKS } from './services/audioService';
 
 interface DDAConfig {
   thresholds: {
@@ -39,10 +40,28 @@ const DEFAULT_DDA_CONFIG: DDAConfig = {
   lifesaverEnabled: true,
 };
 
-const INITIAL_GRID: Grid = Array(GRID_SIZE).fill(null).map(() => Array(GRID_SIZE).fill(0));
+const createEmptyGrid = () => Array(GRID_SIZE).fill(null).map(() => Array(GRID_SIZE).fill(0));
+
+interface Particle {
+  id: number;
+  x: number;
+  y: number;
+  color: string;
+  vx: number;
+  vy: number;
+  rotation: number;
+}
+
+const SPEED_STEPS = [
+  { label: '1x', delay: 500, restart: 1500 },
+  { label: '2x', delay: 100, restart: 1000 },
+  { label: '5x', delay: 10, restart: 100 },
+  { label: 'MAX', delay: 1, restart: 10 }
+];
 
 export default function App() {
-  const [grid, setGrid] = useState<Grid>(INITIAL_GRID);
+  const [grid, setGrid] = useState<Grid>(createEmptyGrid());
+  const [particles, setParticles] = useState<Particle[]>([]);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(() => {
     const saved = localStorage.getItem('block-blast-highscore');
@@ -56,15 +75,39 @@ export default function App() {
   const [feedback, setFeedback] = useState<{ text: string, id: number } | null>(null);
   const [lastPlacement, setLastPlacement] = useState<{ pos: Position, shape: Shape, score: number, id: number } | null>(null);
   const [isShaking, setIsShaking] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [bgmIndex, setBgmIndex] = useState(0);
+  const clearingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const placementTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const shakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const feedbackTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Simulation / Debug State
   const [showSimPanel, setShowSimPanel] = useState(false);
-  const [ddaConfig, setDdaConfig] = useState<DDAConfig>(DEFAULT_DDA_CONFIG);
+  const [ddaConfig, setDdaConfig] = useState<DDAConfig>(() => {
+    const saved = localStorage.getItem('block-blast-dda-config');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return DEFAULT_DDA_CONFIG;
+      }
+    }
+    return DEFAULT_DDA_CONFIG;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('block-blast-dda-config', JSON.stringify(ddaConfig));
+  }, [ddaConfig]);
+
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
+  const [speedIndex, setSpeedIndex] = useState(1);
+  const currentSpeed = SPEED_STEPS[speedIndex];
   const [simStats, setSimStats] = useState({ gamesPlayed: 0, totalScore: 0, avgScore: 0 });
   const [currentRemainingPercent, setCurrentRemainingPercent] = useState(1);
 
   const gridRef = useRef<HTMLDivElement>(null);
+  const cachedGridRect = useRef<DOMRect | null>(null);
 
   // Check if a shape can be placed at a specific position
   const canPlace = useCallback((shape: Shape, pos: Position, currentGrid: Grid): boolean => {
@@ -170,14 +213,63 @@ export default function App() {
   }, [grid, canPlace, ddaConfig]);
 
   const startGame = () => {
-    setGrid(INITIAL_GRID);
+    // Clear any pending timeouts and force immediate state reset
+    if (clearingTimeoutRef.current) clearTimeout(clearingTimeoutRef.current);
+    if (placementTimeoutRef.current) clearTimeout(placementTimeoutRef.current);
+    if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
+    if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
+    
+    clearingTimeoutRef.current = null;
+    placementTimeoutRef.current = null;
+    shakeTimeoutRef.current = null;
+    feedbackTimeoutRef.current = null;
+    
+    audioService.play('click');
+    audioService.startBGM();
+    const newGrid = createEmptyGrid();
+    setGrid(newGrid);
     setScore(0);
     setComboCount(0);
     setFeedback(null);
     setGameOver(false);
     setGameStarted(true);
-    generateTray(INITIAL_GRID);
+    setActiveShape(null);
+    setActivePos(null);
+    setLastPlacement(null);
+    setClearingLines({ rows: [], cols: [] });
+    generateTray(newGrid);
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (clearingTimeoutRef.current) clearTimeout(clearingTimeoutRef.current);
+      if (placementTimeoutRef.current) clearTimeout(placementTimeoutRef.current);
+      if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
+      if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
+    };
+  }, []);
+
+  const toggleMute = () => {
+    const muted = audioService.toggleMute();
+    setIsMuted(muted);
+  };
+
+  const toggleBgmTrack = () => {
+    const nextIndex = (bgmIndex + 1) % BGM_TRACKS.length;
+    setBgmIndex(nextIndex);
+    audioService.setTrack(nextIndex);
+  };
+
+  useEffect(() => {
+    const handleFirstClick = () => {
+      if (gameStarted) {
+        audioService.startBGM();
+      }
+    };
+    window.addEventListener('click', handleFirstClick);
+    return () => window.removeEventListener('click', handleFirstClick);
+  }, [gameStarted]);
 
   useEffect(() => {
     if (score > highScore) {
@@ -203,7 +295,24 @@ export default function App() {
   }, []);
 
   const handlePlace = (shape: Shape, pos: Position) => {
+    // If there's a pending line clear, finish it immediately before placing a new block
+    // This prevents state conflicts and "ghost" blocks
+    if (clearingTimeoutRef.current) {
+      clearTimeout(clearingTimeoutRef.current);
+      // We need to manually apply the clear that was pending
+      // But since we don't easily have the pending clearedGrid here without complex state,
+      // the safest way is to ensure the grid is in its final "cleared" state.
+      // However, handlePlace is usually called after a delay, so we can just let it be
+      // OR we can force the state reset.
+      setClearingLines({ rows: [], cols: [] });
+      clearingTimeoutRef.current = null;
+    }
+
     if (!canPlace(shape, pos, grid)) return false;
+
+    // Reset active preview state immediately on successful placement
+    setActiveShape(null);
+    setActivePos(null);
 
     let blocksPlaced = 0;
     const newGrid = grid.map(row => [...row]);
@@ -218,9 +327,22 @@ export default function App() {
     }
 
     // Trigger landing effects
-    setLastPlacement({ pos, shape, score: blocksPlaced, id: Date.now() });
+    audioService.play('place');
+    const placement = { pos, shape, score: blocksPlaced, id: Date.now() };
+    setLastPlacement(placement);
     setIsShaking(true);
-    setTimeout(() => setIsShaking(false), 100);
+    
+    if (placementTimeoutRef.current) clearTimeout(placementTimeoutRef.current);
+    placementTimeoutRef.current = setTimeout(() => {
+      setLastPlacement(null);
+      placementTimeoutRef.current = null;
+    }, 500);
+
+    if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
+    shakeTimeoutRef.current = setTimeout(() => {
+      setIsShaking(false);
+      shakeTimeoutRef.current = null;
+    }, 200);
 
     // Calculate score for placement
     let newScore = score + blocksPlaced;
@@ -273,6 +395,61 @@ export default function App() {
 
       newScore += bonus;
       setFeedback({ text: feedbackText, id: Date.now() });
+      if (feedbackTimeoutRef.current) clearTimeout(feedbackTimeoutRef.current);
+      feedbackTimeoutRef.current = setTimeout(() => {
+        setFeedback(null);
+        feedbackTimeoutRef.current = null;
+      }, 2000);
+      
+      const pitch = Math.min(1.0 + (linesCleared - 1) * 0.15, 2.0);
+      audioService.play('clear', pitch);
+      
+      if (newCombo > 1) {
+        setTimeout(() => {
+          const comboPitch = Math.min(1.0 + (newCombo - 2) * 0.1, 2.0);
+          audioService.play('combo', comboPitch);
+        }, 200);
+      }
+
+      // Generate particles
+      const clearedCells = new Set<string>();
+      fullRows.forEach(r => {
+        for (let c = 0; c < GRID_SIZE; c++) {
+          clearedCells.add(`${r},${c}`);
+        }
+      });
+      fullCols.forEach(c => {
+        for (let r = 0; r < GRID_SIZE; r++) {
+          clearedCells.add(`${r},${c}`);
+        }
+      });
+
+      const newParticles: Particle[] = [];
+      let particleId = Date.now();
+      
+      clearedCells.forEach(key => {
+        const [r, c] = key.split(',').map(Number);
+        const cellColor = newGrid[r][c];
+        if (cellColor !== 0) {
+          const x = (c + 0.5) * (100 / GRID_SIZE);
+          const y = (r + 0.5) * (100 / GRID_SIZE);
+          for (let i = 0; i < 4; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = Math.random() * 80 + 30;
+            newParticles.push({
+              id: particleId++,
+              x,
+              y,
+              color: cellColor.toString(),
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              rotation: Math.random() * 360
+            });
+          }
+        }
+      });
+      
+      setParticles(prev => [...prev, ...newParticles]);
 
       setGrid([...newGrid]);
       setClearingLines({ rows: fullRows, cols: fullCols });
@@ -280,7 +457,8 @@ export default function App() {
       // Remove from tray immediately
       setTray(nextTray);
       
-      setTimeout(() => {
+      if (clearingTimeoutRef.current) clearTimeout(clearingTimeoutRef.current);
+      clearingTimeoutRef.current = setTimeout(() => {
         const clearedGrid = newGrid.map((row, r) => 
           row.map((cell, c) => {
             if (fullRows.includes(r) || fullCols.includes(c)) {
@@ -298,14 +476,17 @@ export default function App() {
           const newTray = generateTray(clearedGrid);
           if (checkGameOver(newTray, clearedGrid)) {
             setGameOver(true);
+            audioService.play('gameOver');
           }
         } else {
           // Check game over with current remaining tray
           if (checkGameOver(nextTray, clearedGrid)) {
             setGameOver(true);
+            audioService.play('gameOver');
           }
         }
-      }, 600);
+        clearingTimeoutRef.current = null;
+      }, 400);
     } else {
       setComboCount(0); // Reset combo if no lines cleared
       setGrid([...newGrid]);
@@ -315,10 +496,12 @@ export default function App() {
         const newTray = generateTray(newGrid);
         if (checkGameOver(newTray, newGrid)) {
           setGameOver(true);
+          audioService.play('gameOver');
         }
       } else {
         if (checkGameOver(nextTray, newGrid)) {
           setGameOver(true);
+          audioService.play('gameOver');
         }
       }
     }
@@ -339,9 +522,9 @@ export default function App() {
           avgScore: Math.round(newTotal / newGames)
         };
       });
-      setTimeout(startGame, 1000);
+      setTimeout(startGame, currentSpeed.restart);
     }
-  }, [gameOver, isAutoPlaying, score]);
+  }, [gameOver, isAutoPlaying, score, currentSpeed]);
 
   // Auto-Play Bot Heuristic
   useEffect(() => {
@@ -392,10 +575,10 @@ export default function App() {
       if (bestMove) {
         handlePlace(bestMove.shape, bestMove.pos);
       }
-    }, 100); // Fast but visible
+    }, currentSpeed.delay);
 
     return () => clearTimeout(timer);
-  }, [isAutoPlaying, gameOver, gameStarted, tray, grid, canPlace, handlePlace, clearingLines]);
+  }, [isAutoPlaying, gameOver, gameStarted, tray, grid, canPlace, handlePlace, clearingLines, currentSpeed]);
 
   const [activeShape, setActiveShape] = useState<Shape | null>(null);
   const [activePos, setActivePos] = useState<Position | null>(null);
@@ -407,25 +590,23 @@ export default function App() {
   }, [activeShape, activePos, grid, canPlace]);
 
   const handleDrag = useCallback((shape: Shape, event: any, info: any) => {
-    if (!gridRef.current) return;
+    if (!gridRef.current || !cachedGridRect.current || !info.grabOffset) return;
 
-    const gridRect = gridRef.current.getBoundingClientRect();
-    const cellSize = gridRect.width / GRID_SIZE;
+    const gridRect = cachedGridRect.current;
+    const padding = 4;
+    const cellSize = (gridRect.width - padding * 2) / GRID_SIZE;
 
-    // Use clientX/Y from event if available, fallback to info.point
-    // clientX/Y are always viewport-relative, matching getBoundingClientRect
-    const pointerX = event.clientX ?? (event.touches?.[0]?.clientX) ?? info.point.x;
-    const pointerY = event.clientY ?? (event.touches?.[0]?.clientY) ?? info.point.y;
+    // Calculate the actual visual center of the block based on the grab offset
+    // This ensures the preview is always perfectly aligned with the dragged block
+    const visualCenterX = info.point.x - info.grabOffset.x - gridRect.left - padding;
+    const visualCenterY = info.point.y - info.grabOffset.y - gridRect.top - padding;
 
-    const blockX = pointerX - gridRect.left;
-    const blockY = pointerY - gridRect.top;
+    // Map the visual center to grid coordinates
+    const gridX = Math.round((visualCenterX / cellSize) - (shape.cells[0].length / 2));
+    const gridY = Math.round((visualCenterY / cellSize) - (shape.cells.length / 2));
 
-    // Center the shape on the cursor by subtracting half its width/height in cells
-    const gridX = Math.round((blockX / cellSize) - (shape.cells[0].length / 2));
-    const gridY = Math.round((blockY / cellSize) - (shape.cells.length / 2));
-
-    if (gridX >= -2 && gridX < GRID_SIZE && 
-        gridY >= -2 && gridY < GRID_SIZE) {
+    if (gridX >= -1 && gridX < GRID_SIZE && 
+        gridY >= -1 && gridY < GRID_SIZE) {
       setActiveShape(shape);
       setActivePos({ x: gridX, y: gridY });
     } else {
@@ -457,37 +638,63 @@ export default function App() {
     <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-[#121212] select-none">
       {/* Header */}
       <div className="w-full max-w-md flex justify-between items-center mb-8">
-        <div className="flex items-center gap-4">
+        {/* Title & High Score */}
+        <div className="flex-1 flex justify-start">
           <div>
-            <h1 className="text-3xl font-black italic tracking-tighter text-white">BLOCK BLAST</h1>
-            <div className="flex items-center gap-2 text-yellow-500 mt-1">
+            <h1 className="text-3xl font-black italic tracking-tighter text-white leading-none">BLOCK<br/>BLAST</h1>
+            <div className="flex items-center gap-2 text-yellow-500 mt-2">
               <Trophy size={16} />
               <span className="text-sm font-bold uppercase tracking-widest">{highScore}</span>
             </div>
           </div>
+        </div>
+
+        {/* Controls */}
+        <div className="flex items-center justify-center gap-2 px-2 shrink-0">
           <button 
             onClick={() => setShowSimPanel(true)}
-            className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/40 hover:text-white transition-colors"
+            className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/40 hover:text-white transition-colors flex items-center justify-center"
             title="Simulation Settings"
           >
             <Settings size={20} />
           </button>
+          <button 
+            onClick={toggleBgmTrack}
+            className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/40 hover:text-white transition-colors relative group flex items-center justify-center"
+            title={`Music: ${BGM_TRACKS[bgmIndex].name}`}
+          >
+            <Music size={20} />
+            <span className="absolute -bottom-8 left-1/2 -translate-x-1/2 whitespace-nowrap bg-black/80 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+              {BGM_TRACKS[bgmIndex].name}
+            </span>
+          </button>
+          <button 
+            onClick={toggleMute}
+            className="p-2 bg-white/5 hover:bg-white/10 rounded-full text-white/40 hover:text-white transition-colors flex items-center justify-center"
+            title={isMuted ? "Unmute" : "Mute"}
+          >
+            {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+          </button>
         </div>
-        <div className="bg-[#1e1e1e] px-6 py-2 rounded-2xl border border-white/5 shadow-xl relative overflow-hidden">
-          <span className="block text-[10px] uppercase tracking-widest text-white/40 font-bold mb-0.5">Score</span>
-          <span className="text-2xl font-black text-white tabular-nums">{score}</span>
-          
-          {/* Combo Indicator */}
-          <AnimatePresence>
-            {comboCount > 1 && (
-              <motion.div 
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="absolute bottom-0 left-0 right-0 h-1 bg-yellow-500 shadow-[0_0_10px_#eab308]"
-              />
-            )}
-          </AnimatePresence>
+
+        {/* Score */}
+        <div className="flex-1 flex justify-end">
+          <div className="bg-[#1e1e1e] min-w-[80px] px-4 py-2 rounded-2xl border border-white/5 shadow-xl relative overflow-hidden flex flex-col items-center justify-center">
+            <span className="block text-[10px] uppercase tracking-widest text-white/40 font-bold mb-0.5 text-center">Score</span>
+            <span className="block text-2xl font-black text-white tabular-nums text-center leading-none">{score}</span>
+            
+            {/* Combo Indicator */}
+            <AnimatePresence>
+              {comboCount > 1 && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="absolute bottom-0 left-0 right-0 h-1 bg-yellow-500 shadow-[0_0_10px_#eab308]"
+                />
+              )}
+            </AnimatePresence>
+          </div>
         </div>
       </div>
 
@@ -500,7 +707,7 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.5, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 1.5, y: -20 }}
-              onAnimationComplete={() => setTimeout(() => setFeedback(null), 1000)}
+              onAnimationComplete={() => {}}
               className="text-xl font-black italic tracking-tighter text-yellow-400 drop-shadow-[0_0_8px_rgba(234,179,8,0.5)]"
             >
               {feedback.text}
@@ -511,16 +718,16 @@ export default function App() {
 
       {/* Grid */}
       <div className="relative">
-        <motion.div 
+        <div 
           ref={gridRef}
-          animate={isShaking ? { x: [-2, 2, -1, 1, 0] } : { x: 0 }}
-          transition={{ duration: 0.1 }}
-          className="grid-container w-[320px] h-[320px] sm:w-[400px] sm:h-[400px]"
+          className={`grid-container w-[320px] h-[320px] sm:w-[400px] sm:h-[400px] ${isShaking ? 'animate-shake' : ''}`}
         >
           {grid.map((row, r) => (
             row.map((cell, c) => {
               const isPreview = isPreviewCell(r, c);
-              const isJustPlaced = lastPlacement && 
+              const isClearing = clearingLines.rows.includes(r) || clearingLines.cols.includes(c);
+              
+              const isJustPlaced = !isClearing && lastPlacement && cell !== 0 &&
                 r >= lastPlacement.pos.y && r < lastPlacement.pos.y + lastPlacement.shape.cells.length &&
                 c >= lastPlacement.pos.x && c < lastPlacement.pos.x + lastPlacement.shape.cells[0].length &&
                 lastPlacement.shape.cells[r - lastPlacement.pos.y][c - lastPlacement.pos.x] === 1;
@@ -528,23 +735,42 @@ export default function App() {
               let previewClasses = "";
               if (isPreview) {
                 if (isValidPlacement) {
-                  previewClasses = `${activeShape?.color} opacity-60 ring-2 ring-white/30 z-10`;
+                  previewClasses = `${activeShape?.color} opacity-40 ring-4 ring-white/50 z-20`;
                 } else {
-                  previewClasses = "bg-red-500/50 ring-2 ring-red-500/50 z-10";
+                  previewClasses = "bg-red-600 opacity-80 ring-4 ring-red-500 z-20";
                 }
               }
               
               return (
-                <motion.div 
+                <div 
                   key={`${r}-${c}`} 
-                  animate={isJustPlaced ? { scale: [1, 1.1, 1], filter: ["brightness(1)", "brightness(1.5)", "brightness(1)"] } : {}}
-                  transition={{ duration: 0.2 }}
-                  className={`grid-cell ${cell !== 0 ? cell : ''} ${previewClasses} ${clearingLines.rows.includes(r) || clearingLines.cols.includes(c) ? 'brightness-150 scale-95' : ''}`}
+                  className={`grid-cell ${cell !== 0 ? cell : ''} ${previewClasses} ${isClearing ? 'animate-clear z-30' : ''} ${isJustPlaced ? 'animate-place z-10' : ''}`}
                 />
               );
             })
           ))}
-        </motion.div>
+        </div>
+
+        {/* Particles */}
+        <AnimatePresence>
+          {particles.map(p => (
+            <motion.div
+              key={p.id}
+              initial={{ x: "-50%", y: "-50%", scale: 1, opacity: 1, rotate: 0 }}
+              animate={{ 
+                x: `calc(-50% + ${p.vx}px)`, 
+                y: `calc(-50% + ${p.vy}px)`, 
+                scale: 0, 
+                opacity: 0,
+                rotate: p.rotation 
+              }}
+              transition={{ duration: 0.6, ease: "easeOut" }}
+              className={`absolute w-3 h-3 sm:w-4 sm:h-4 rounded-sm shadow-lg ${p.color}`}
+              style={{ left: `${p.x}%`, top: `${p.y}%`, pointerEvents: 'none', zIndex: 50 }}
+              onAnimationComplete={() => setParticles(prev => prev.filter(particle => particle.id !== p.id))}
+            />
+          ))}
+        </AnimatePresence>
 
         {/* Floating Score Popups */}
         <AnimatePresence>
@@ -554,7 +780,6 @@ export default function App() {
               initial={{ opacity: 0, y: 0 }}
               animate={{ opacity: 1, y: -40 }}
               exit={{ opacity: 0 }}
-              onAnimationComplete={() => setTimeout(() => setLastPlacement(null), 500)}
               style={{ 
                 position: 'absolute',
                 left: `${(lastPlacement.pos.x + lastPlacement.shape.cells[0].length / 2) * (100 / GRID_SIZE)}%`,
@@ -598,18 +823,36 @@ export default function App() {
                   {isAutoPlaying ? 'STOP AUTO-PLAY' : 'START AUTO-PLAY'}
                 </button>
                 
-                {isAutoPlaying && (
-                  <div className="mt-4 p-4 bg-white/5 rounded-xl border border-white/5">
-                    <div className="flex justify-between text-xs mb-2">
-                      <span className="text-white/40">Games Played</span>
-                      <span className="text-white font-mono">{simStats.gamesPlayed}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-white/40">Avg Score</span>
-                      <span className="text-white font-mono">{simStats.avgScore}</span>
-                    </div>
+                <div className="mt-4 flex gap-2">
+                  <div className="flex-1 flex bg-white/5 rounded-lg p-1">
+                    {SPEED_STEPS.map((step, idx) => (
+                      <button
+                        key={step.label}
+                        onClick={() => setSpeedIndex(idx)}
+                        className={`flex-1 py-1.5 text-[10px] font-bold rounded-md transition-colors ${speedIndex === idx ? 'bg-blue-600 text-white' : 'text-white/40 hover:text-white/80'}`}
+                      >
+                        {step.label}
+                      </button>
+                    ))}
                   </div>
-                )}
+                  <button
+                    onClick={() => setSimStats({ gamesPlayed: 0, totalScore: 0, avgScore: 0 })}
+                    className="px-4 py-2 rounded-lg text-xs font-bold bg-white/10 text-white/60 hover:bg-white/20 transition-colors"
+                  >
+                    RESET
+                  </button>
+                </div>
+
+                <div className="mt-4 p-4 bg-white/5 rounded-xl border border-white/5">
+                  <div className="flex justify-between text-xs mb-2">
+                    <span className="text-white/40">Games Played</span>
+                    <span className="text-white font-mono">{simStats.gamesPlayed}</span>
+                  </div>
+                  <div className="flex justify-between text-xs">
+                    <span className="text-white/40">Avg Score</span>
+                    <span className="text-white font-mono">{simStats.avgScore}</span>
+                  </div>
+                </div>
               </section>
 
               {/* DDA Config */}
@@ -738,6 +981,9 @@ export default function App() {
           <div key={shape.id} className="flex-1 flex justify-center items-center overflow-visible">
             <DraggableBlock 
               shape={shape} 
+              onDragStart={() => {
+                cachedGridRect.current = gridRef.current?.getBoundingClientRect() || null;
+              }}
               onDrag={(e, info) => handleDrag(shape, e, info)}
               onDragEnd={handleDragEnd}
             />
@@ -749,24 +995,43 @@ export default function App() {
 }
 
 interface DraggableBlockProps {
-  key?: string;
   shape: Shape;
-  onDrag: (event: any, info: { point: { x: number; y: number } }) => void;
+  onDragStart: (info: { x: number, y: number }) => void;
+  onDrag: (event: any, info: { point: { x: number; y: number }; grabOffset: { x: number, y: number } }) => void;
   onDragEnd: () => void;
 }
 
-function DraggableBlock({ shape, onDrag, onDragEnd }: DraggableBlockProps) {
+function DraggableBlock({ shape, onDragStart, onDrag, onDragEnd }: DraggableBlockProps) {
+  const blockRef = useRef<HTMLDivElement>(null);
+  const grabOffset = useRef<{ x: number, y: number }>({ x: 0, y: 0 });
+
   return (
     <div className="relative flex items-center justify-center">
       <motion.div
+        ref={blockRef}
         drag
         dragMomentum={false}
         dragSnapToOrigin={true}
-        onDrag={(e, info) => onDrag(e, info)}
+        onDragStart={(e, info) => {
+          const rect = blockRef.current?.getBoundingClientRect();
+          if (rect) {
+            // Store the offset between the pointer and the block's center at the start
+            // This allows us to track the visual center accurately during drag
+            grabOffset.current = {
+              x: info.point.x - (rect.left + rect.width / 2),
+              y: info.point.y - (rect.top + rect.height / 2)
+            };
+          }
+          onDragStart(info.point);
+        }}
+        onDrag={(e, info) => {
+          onDrag(e, { ...info, grabOffset: grabOffset.current });
+        }}
         onDragEnd={onDragEnd}
         whileDrag={{ 
-          scale: 1.8, 
+          scale: 1.8,
           zIndex: 100,
+          opacity: 0.8,
           filter: "drop-shadow(0 10px 20px rgba(0,0,0,0.5))"
         }}
         className="cursor-grab active:cursor-grabbing touch-none"
