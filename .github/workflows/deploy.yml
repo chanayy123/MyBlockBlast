@@ -5,11 +5,13 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+# 明确部署权限
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# 增加并发控制，防止多次提交导致打包冲突
 concurrency:
   group: "pages"
   cancel-in-progress: true
@@ -24,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22 # 升级到 Node 22 解决警告
           cache: 'npm'
           
       - name: Install dependencies
